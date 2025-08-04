@@ -164,7 +164,7 @@ class LLMProviderHandler:
             "contents": gemini_messages,
             "generationConfig": {
                 "temperature": kwargs.get("temperature", 0.7),
-                "maxOutputTokens": kwargs.get("max_tokens", 4096),
+                "maxOutputTokens": kwargs.get("max_tokens", config.MAX_OUTPUT_TOKENS),
             }
         }
         

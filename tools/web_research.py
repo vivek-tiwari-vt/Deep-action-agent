@@ -40,7 +40,8 @@ from config import (
     BROWSER_HEADLESS, BROWSER_SLOW_MO, BROWSER_TIMEOUT, 
     BROWSER_VIEWPORT_WIDTH, BROWSER_VIEWPORT_HEIGHT, BROWSER_USER_AGENT,
     WEB_RESEARCH_MAX_PAGES, WEB_RESEARCH_MAX_RETRIES,
-    WEB_RESEARCH_DELAY_MIN, WEB_RESEARCH_DELAY_MAX, WEB_RESEARCH_SHOW_PROGRESS
+    WEB_RESEARCH_DELAY_MIN, WEB_RESEARCH_DELAY_MAX, WEB_RESEARCH_SHOW_PROGRESS,
+    MAX_OUTPUT_TOKENS
 )
 from tools.debug_logger import log_browser_action, log_error
 from tools.task_monitor import log_task_activity, get_task_monitor
@@ -985,7 +986,7 @@ Respond in JSON format:
                 provider="gemini",  # Use Gemini for navigation decisions
                 model="gemini-1.5-flash",
                 messages=messages,
-                max_tokens=500
+                max_tokens=MAX_OUTPUT_TOKENS
             )
             
             # Extract the response content
@@ -1410,7 +1411,7 @@ Order by priority_score (highest first). Focus on the most credible and relevant
                 provider="gemini",
                 model="gemini-1.5-flash",
                 messages=messages,
-                max_tokens=800
+                max_tokens=MAX_OUTPUT_TOKENS
             )
             
             # Extract the response content
@@ -1512,7 +1513,7 @@ Respond in JSON format:
                 provider="gemini",
                 model="gemini-1.5-flash",
                 messages=messages,
-                max_tokens=200
+                max_tokens=MAX_OUTPUT_TOKENS
             )
             
             # Extract the response content
@@ -2378,7 +2379,7 @@ Provide a well-structured summary with clear sections and actionable insights.
                 provider="gemini",
                 model="gemini-1.5-flash",
                 messages=messages,
-                max_tokens=1500
+                max_tokens=MAX_OUTPUT_TOKENS
             )
             
             # Extract the response content
@@ -3314,12 +3315,12 @@ def get_web_research_tools() -> List[Dict]:
                         "extract_data": {
                             "type": "boolean",
                             "description": "Whether to extract content after clicking the link",
-                            "default": true
+                            "default": True
                         },
                         "save_data": {
                             "type": "boolean",
                             "description": "Whether to save extracted data to a file",
-                            "default": true
+                            "default": True
                         }
                     },
                     "required": []

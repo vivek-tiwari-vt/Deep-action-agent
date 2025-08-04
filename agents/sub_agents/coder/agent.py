@@ -4,6 +4,9 @@ Specialized in programming, data analysis, automation, and script creation.
 """
 
 import json
+import subprocess
+import tempfile
+import time
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 from loguru import logger
@@ -26,6 +29,10 @@ class CoderAgent:
         
         # Load system prompt
         self.system_prompt = self._load_system_prompt()
+        
+        # Create output directory for generated code files
+        self.code_output_dir = self.workspace_path / "generated_code"
+        self.code_output_dir.mkdir(exist_ok=True)
     
     def _load_system_prompt(self) -> str:
         """Load the coder agent system prompt."""
@@ -49,6 +56,14 @@ Your responsibilities:
 - Automate repetitive tasks
 - Debug and fix code issues
 - Create reusable tools and utilities
+
+IMPORTANT: You must create COMPLETE, RUNNABLE Python files that can be executed directly.
+Your code should include:
+1. Complete function implementations
+2. Comprehensive test cases
+3. Main execution block (if __name__ == "__main__")
+4. Proper error handling
+5. Clear documentation
 
 Always follow best practices for code quality, security, and maintainability."""
     
@@ -121,18 +136,118 @@ Always follow best practices for code quality, security, and maintainability."""
             logger.error(f"Tool execution failed for {function_name}: {e}")
             return f"Error executing {function_name}: {str(e)}"
     
+    def _create_code_file(self, code_content: str, filename: str = None) -> str:
+        """Create a runnable Python code file."""
+        if not filename:
+            # Generate filename from task description
+            filename = f"solution_{int(time.time())}.py"
+        
+        # Ensure .py extension
+        if not filename.endswith('.py'):
+            filename += '.py'
+        
+        file_path = self.code_output_dir / filename
+        
+        # Write the code to file
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.write(code_content)
+        
+        logger.info(f"Created code file: {file_path}")
+        return str(file_path)
+    
+    def _test_code_file(self, file_path: str) -> Dict[str, Any]:
+        """Test a Python code file and return results."""
+        try:
+            # Run the Python file
+            result = subprocess.run(
+                ['python', file_path],
+                capture_output=True,
+                text=True,
+                timeout=30  # 30 second timeout
+            )
+            
+            return {
+                'success': result.returncode == 0,
+                'stdout': result.stdout,
+                'stderr': result.stderr,
+                'returncode': result.returncode,
+                'file_path': file_path
+            }
+            
+        except subprocess.TimeoutExpired:
+            return {
+                'success': False,
+                'stdout': '',
+                'stderr': 'Execution timed out after 30 seconds',
+                'returncode': -1,
+                'file_path': file_path
+            }
+        except Exception as e:
+            return {
+                'success': False,
+                'stdout': '',
+                'stderr': f'Error running file: {str(e)}',
+                'returncode': -1,
+                'file_path': file_path
+            }
+    
+    def _extract_code_from_response(self, response_text: str) -> str:
+        """Extract Python code from LLM response."""
+        # Look for code blocks
+        if '```python' in response_text:
+            start = response_text.find('```python') + 9
+            end = response_text.find('```', start)
+            if end != -1:
+                return response_text[start:end].strip()
+        
+        # If no code blocks, look for def or class patterns
+        lines = response_text.split('\n')
+        code_lines = []
+        in_code = False
+        
+        for line in lines:
+            if line.strip().startswith('def ') or line.strip().startswith('class ') or line.strip().startswith('import ') or line.strip().startswith('from '):
+                in_code = True
+            
+            if in_code:
+                code_lines.append(line)
+            
+            # Stop at markdown headers or other non-code content
+            if in_code and line.strip().startswith('**') and line.strip().endswith('**'):
+                break
+        
+        if code_lines:
+            return '\n'.join(code_lines).strip()
+        
+        # If still no code found, return the whole response
+        return response_text
+    
+    def _generate_test_feedback(self, test_result: Dict[str, Any]) -> str:
+        """Generate feedback based on test results."""
+        if test_result['success']:
+            return f"✅ Code executed successfully!\nOutput:\n{test_result['stdout']}"
+        else:
+            feedback = f"❌ Code execution failed!\n"
+            if test_result['stderr']:
+                feedback += f"Error:\n{test_result['stderr']}\n"
+            if test_result['stdout']:
+                feedback += f"Output:\n{test_result['stdout']}\n"
+            return feedback
+    
     def execute_task(self, task_description: str, context: str = "") -> str:
         """
-        Execute a coding task.
+        Execute a coding task with automatic testing and iteration.
         
         Args:
             task_description: Description of the coding task
             context: Additional context or requirements
             
         Returns:
-            Coding results and outputs
+            Path to the final working code file
         """
-        # Prepare messages
+        logger.info(f"Starting coding task: {task_description}")
+        
+        # Prepare initial messages
         messages = [
             {"role": "system", "content": self.system_prompt},
             {"role": "user", "content": f"""
@@ -140,33 +255,26 @@ Coding Task: {task_description}
 
 Additional Context: {context}
 
-Please approach this coding task systematically:
+CRITICAL REQUIREMENTS:
+1. Create a COMPLETE, RUNNABLE Python file that can be executed directly
+2. Include comprehensive test cases within the same file
+3. Add a main execution block (if __name__ == "__main__") that runs the tests
+4. Handle all edge cases and error conditions
+5. Provide clear documentation and comments
 
-1. **Analysis**: Understand the requirements and break down the problem
-2. **Planning**: Design the solution approach and identify needed tools/libraries
-3. **Implementation**: Write clean, well-documented code
-4. **Testing**: Test the code with appropriate test cases
-5. **Documentation**: Create clear documentation and usage examples
-6. **Optimization**: Optimize for performance and maintainability if needed
+The code should be self-contained and executable. Include all necessary imports, function definitions, test cases, and a main execution block.
 
-Guidelines:
-- Write clean, readable, and well-commented code
-- Follow Python best practices and conventions
-- Handle errors gracefully with appropriate exception handling
-- Create modular, reusable code when possible
-- Test your code thoroughly before finalizing
-- Save important scripts and outputs to files
-- Provide clear explanations of your approach and solutions
-
-Focus on creating robust, maintainable solutions that solve the problem effectively.
+Please create the complete Python code file now.
 """}
         ]
         
-        max_iterations = 15
-        iteration = 0
+        max_attempts = 5
+        attempt = 0
+        last_test_result = None
         
-        while iteration < max_iterations:
-            iteration += 1
+        while attempt < max_attempts:
+            attempt += 1
+            logger.info(f"Attempt {attempt}/{max_attempts}")
             
             try:
                 # Get available tools
@@ -176,6 +284,7 @@ Focus on creating robust, maintainable solutions that solve the problem effectiv
                 response = self._call_llm(messages, tools)
                 
                 if not response.get('choices'):
+                    logger.error("No response from LLM")
                     break
                 
                 choice = response['choices'][0]
@@ -184,42 +293,62 @@ Focus on creating robust, maintainable solutions that solve the problem effectiv
                 # Add assistant message to conversation
                 messages.append(message)
                 
-                # Check if there are tool calls
-                if message.get('tool_calls'):
-                    # Execute tool calls
-                    for tool_call in message['tool_calls']:
-                        result = self._execute_tool_call(tool_call)
-                        
-                        # Add tool result to conversation
-                        messages.append({
-                            "role": "tool",
-                            "tool_call_id": tool_call['id'],
-                            "name": tool_call['function']['name'],
-                            "content": result
-                        })
+                # Extract code from response
+                code_content = self._extract_code_from_response(message.get('content', ''))
                 
-                # Check if the coding task is complete
-                if choice.get('finish_reason') == 'stop' and not message.get('tool_calls'):
-                    # Check if we have substantial coding content
-                    if len(message.get('content', '')) > 300:
-                        break
-                    
-                    # Ask for more comprehensive results if needed
+                if not code_content or len(code_content.strip()) < 50:
+                    logger.warning("No substantial code found in response")
                     messages.append({
                         "role": "user",
-                        "content": "Please provide a comprehensive summary of your coding work, including the final solution, any files created, and usage instructions."
+                        "content": "Please provide the complete Python code implementation. The response should contain the full, runnable code."
                     })
+                    continue
                 
-            except Exception as e:
-                logger.error(f"Error in coding iteration {iteration}: {e}")
+                # Create code file
+                filename = f"solution_attempt_{attempt}.py"
+                file_path = self._create_code_file(code_content, filename)
+                
+                # Test the code
+                test_result = self._test_code_file(file_path)
+                last_test_result = test_result
+                
+                logger.info(f"Test result: {'SUCCESS' if test_result['success'] else 'FAILED'}")
+                
+                if test_result['success']:
+                    logger.info("✅ Code executed successfully!")
+                    return f"✅ SUCCESS! Working code file created: {file_path}\n\nOutput:\n{test_result['stdout']}"
+                
+                # If failed, generate feedback and try again
+                feedback = self._generate_test_feedback(test_result)
+                logger.info(f"Code failed, generating feedback for next attempt")
+                
                 messages.append({
                     "role": "user",
-                    "content": f"An error occurred: {str(e)}. Please continue with alternative approaches or debug the issue."
+                    "content": f"""
+The code failed to execute properly. Here are the issues:
+
+{feedback}
+
+Please fix the code and provide a corrected version that:
+1. Addresses the specific errors shown above
+2. Includes proper error handling
+3. Has complete, runnable code
+4. Passes all test cases
+
+Provide the complete corrected Python code.
+"""
+                })
+                
+            except Exception as e:
+                logger.error(f"Error in attempt {attempt}: {e}")
+                messages.append({
+                    "role": "user",
+                    "content": f"An error occurred: {str(e)}. Please provide a simpler, working solution."
                 })
         
-        # Extract final coding summary
-        if messages and messages[-1]['role'] == 'assistant':
-            return messages[-1]['content']
+        # If all attempts failed, return the last result
+        if last_test_result:
+            return f"❌ FAILED after {max_attempts} attempts. Last file: {last_test_result['file_path']}\n\nError:\n{last_test_result['stderr']}"
         else:
-            return "Coding task completed. Please check the workspace files for scripts and outputs."
+            return "❌ FAILED: Could not generate any code"
 

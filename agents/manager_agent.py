@@ -98,6 +98,18 @@ class ManagerAgent:
             progress_tracker.create_api_progress_callback(self.task_id)
         )
     
+    def _setup_workspace_manager(self):
+        """Setup workspace manager for this agent."""
+        from main import get_workspace_manager
+        
+        try:
+            # Get or create workspace manager for this task
+            self.workspace_manager = get_workspace_manager(self.task_id)
+            print(f"✅ Workspace manager initialized for task: {self.task_id}")
+        except Exception as e:
+            print(f"⚠️  Warning: Could not initialize workspace manager: {e}")
+            self.workspace_manager = None
+    
     def _load_system_prompt(self) -> str:
         """Load the manager agent system prompt."""
         prompt_file = Path(__file__).parent / "system_prompt.md"

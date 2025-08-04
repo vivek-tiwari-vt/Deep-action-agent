@@ -115,6 +115,9 @@ MAX_CODE_EXECUTION_TIME = int(get_env_var("MAX_CODE_EXECUTION_TIME", "30"))
 ALLOWED_FILE_EXTENSIONS = get_env_var("ALLOWED_FILE_EXTENSIONS", ".py,.txt,.json,.csv,.md,.html").split(",")
 MAX_FILE_SIZE_MB = int(get_env_var("MAX_FILE_SIZE_MB", "10"))
 
+# Token settings
+MAX_OUTPUT_TOKENS = int(get_env_var("MAX_OUTPUT_TOKENS", "64000"))
+
 # Logging Settings
 LOG_LEVEL = get_env_var("LOG_LEVEL", "INFO")
 LOG_TO_FILE = get_env_var("LOG_TO_FILE", "true").lower() == "true"
