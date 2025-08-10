@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Deep Action Agent</title>
+  <link rel="stylesheet" href="style.css" />
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+  <meta name="color-scheme" content="dark light" />
+</head>
+<body>
+  <div class="app">
+    <header class="brand">
+      <img src="logo.svg" alt="logo" width="32" height="32" />
+      <div>
+        <h1>Deep Action Agent</h1>
+        <p class="sub">Live tasks, streaming events, beautiful output.</p>
+      </div>
+    </header>
+
+    <section class="controls">
+      <input id="taskInput" type="text" placeholder="Describe your task (e.g., Summarize top 2025 AI breakthroughs)" />
+      <button id="runBtn">Run</button>
+    </section>
+
+    <section class="live">
+      <div class="panel">
+        <h2>Live Events</h2>
+        <pre id="events"></pre>
+      </div>
+      <div class="panel">
+        <h2>Status</h2>
+        <pre id="status"></pre>
+      </div>
+    </section>
+
+    <section class="output">
+      <h2>Output</h2>
+      <pre id="output"></pre>
+    </section>
+  </div>
+
+  <script src="app.js"></script>
+  <script>
+    // Prefer dark mode vibes
+    document.documentElement.style.setProperty('color-scheme', 'dark');
+  </script>
+</body>
+</html>

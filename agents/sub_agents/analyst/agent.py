@@ -11,6 +11,12 @@ from loguru import logger
 from llm_providers.provider_handler import llm_handler
 from tools.file_system_tools import file_system_tools, get_file_system_tools
 from tools.code_interpreter import code_interpreter, get_code_interpreter_tools
+from tools.venv_manager import venv_manager, get_venv_tools
+from tools.spreadsheet_tools import spreadsheet_tools, get_spreadsheet_tools
+from tools.doc_ingestion import doc_ingestion, get_doc_ingestion_tools
+from tools.structured_extraction import structured_extraction, get_structured_extraction_tools
+from tools.vector_memory import vector_memory, get_vector_memory_tools
+from tools.html_reporter import html_reporter, get_html_reporter_tools
 import config
 
 class AnalystAgent:
@@ -58,7 +64,22 @@ Always focus on accuracy, objectivity, and clear communication of findings."""
         tools = []
         tools.extend(get_file_system_tools())
         tools.extend(get_code_interpreter_tools())
+        tools.extend(get_venv_tools())
+        tools.extend(get_spreadsheet_tools())
+        tools.extend(get_doc_ingestion_tools())
+        tools.extend(get_structured_extraction_tools())
+        tools.extend(get_vector_memory_tools())
+        tools.extend(get_html_reporter_tools())
         return tools
+
+    def _ensure_venv_and_get_python(self) -> Optional[str]:
+        try:
+            creation = venv_manager.create_task_venv(str(self.workspace_path))
+            if not creation.get("success"):
+                return None
+            return creation.get("python")
+        except Exception:
+            return None
     
     def _call_llm(self, messages: List[Dict], tools: Optional[List[Dict]] = None) -> Dict:
         """Make an LLM call with error handling."""
@@ -85,6 +106,10 @@ Always focus on accuracy, objectivity, and clear communication of findings."""
         
         try:
             if function_name == 'execute_python_code':
+                if 'python_executable' not in arguments or not arguments.get('python_executable'):
+                    py = self._ensure_venv_and_get_python()
+                    if py:
+                        arguments['python_executable'] = py
                 result = code_interpreter.execute_python_code(**arguments)
                 return json.dumps(result, indent=2)
             
@@ -97,6 +122,7 @@ Always focus on accuracy, objectivity, and clear communication of findings."""
                 return json.dumps(result, indent=2)
             
             elif function_name == 'create_and_run_script':
+                _ = self._ensure_venv_and_get_python()
                 result = code_interpreter.create_and_run_script(**arguments)
                 return json.dumps(result, indent=2)
             
@@ -115,6 +141,41 @@ Always focus on accuracy, objectivity, and clear communication of findings."""
                 
                 return json.dumps(result, indent=2)
             
+            elif function_name in ['create_task_venv', 'venv_install']:
+                if function_name == 'create_task_venv':
+                    result = venv_manager.create_task_venv(**arguments)
+                else:
+                    result = venv_manager.install(**arguments)
+                return json.dumps(result, indent=2)
+
+            elif function_name in ['read_table', 'write_table', 'aggregate']:
+                if function_name == 'read_table':
+                    result = spreadsheet_tools.read_table(**arguments)
+                elif function_name == 'write_table':
+                    result = spreadsheet_tools.write_table(**arguments)
+                else:
+                    result = spreadsheet_tools.aggregate(**arguments)
+                return json.dumps(result, indent=2)
+
+            elif function_name == 'ingest':
+                result = doc_ingestion.ingest(**arguments)
+                return json.dumps(result, indent=2)
+
+            elif function_name == 'extract_with_patterns':
+                result = structured_extraction.extract_with_patterns(**arguments)
+                return json.dumps(result, indent=2)
+
+            elif function_name in ['vector_upsert', 'vector_query']:
+                if function_name == 'vector_upsert':
+                    result = vector_memory.upsert(**arguments)
+                else:
+                    result = vector_memory.query(**arguments)
+                return json.dumps(result, indent=2)
+
+            elif function_name == 'render_html_report':
+                result = html_reporter.render(**arguments)
+                return json.dumps(result, indent=2)
+
             else:
                 return f"Unknown function: {function_name}"
                 

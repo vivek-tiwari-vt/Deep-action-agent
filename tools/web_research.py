@@ -244,12 +244,16 @@ class WebResearch:
         self.session_data = {}
         self.browser_initialized = False
         self.task_id = None  # Store task_id for file organization
+        # Serialize Playwright page interactions to avoid concurrent typing/query corruption
+        self._page_lock = None  # created lazily on first use
         
         # HTTP session for simple requests
         self.http_session = requests.Session()
         self.http_session.headers.update({
             'User-Agent': BROWSER_USER_AGENT
         })
+        # Track visited URLs in this session to avoid re-clicking the same links
+        self.visited_urls = set()
         
         # Anti-detection settings with environment variable support
         self.user_agents = [
@@ -711,7 +715,7 @@ class WebResearch:
             await self._write_progress_to_file(task_id, "scrolling_completed", {"url": url})
             
             # Use smart LLM-driven navigation to decide what to do
-            await self._smart_navigation_with_llm(task_id, query)
+            await self._smart_navigation_with_llm(task_id, query=None)
             
             # Wait a bit more for any dynamic content
             await asyncio.sleep(1)
@@ -1240,7 +1244,7 @@ Respond in JSON format:
                 })
                 
                 # Use intelligent link prioritization
-                prioritized_links = await self._ask_llm_to_prioritize_links(search_results, max_pages * 2, task_id)
+                prioritized_links = await self._ask_llm_to_prioritize_links(search_results, max_pages * 2)
                 
                 await self._write_progress_to_file(task_id, "intelligent_prioritization_completed", {
                     "prioritized_links": len(prioritized_links),
@@ -1333,12 +1337,82 @@ Respond in JSON format:
             logger.error(f"Multi-page extraction with intelligence failed: {e}")
             await self._write_progress_to_file(task_id, "multi_page_extraction_error", {"error": str(e)})
             return extracted_content
+
+    async def _multi_page_extraction_fast(self, search_results: List[Dict], query: str, max_pages: int, task_id: str = None) -> List[Dict[str, Any]]:
+        """Fast extractor: choose links, open, extract quickly, go back, repeat."""
+        results: List[Dict[str, Any]] = []
+        try:
+            # Prioritize links quickly
+            try:
+                prioritized = await self._ask_llm_to_prioritize_links(search_results, max_results=max_pages * 2)
+            except Exception:
+                prioritized = []
+            candidates = prioritized if prioritized else [
+                {
+                    'index': i,
+                    'title': r.get('text') or r.get('title') or '',
+                    'url': r.get('href') or r.get('url') or '',
+                    'snippet': r.get('snippet') or ''
+                }
+                for i, r in enumerate(search_results)
+                if (r.get('href') or r.get('url'))
+            ]
+            visited = 0
+            for link in candidates:
+                if visited >= max_pages:
+                    break
+                url = link.get('url') or ''
+                if not url.startswith('http'):
+                    continue
+                # skip already visited in this session
+                if url in self.visited_urls:
+                    continue
+                ok = await self._navigate_with_interactivity(url, task_id)
+                if not ok:
+                    continue
+                # Fast extraction with timeout
+                try:
+                    page_data = await asyncio.wait_for(self.extract_content(), timeout=8)
+                except Exception:
+                    page_data = None
+                text = (page_data or {}).get('content') or ''
+                if text and len(text) > 200:
+                    results.append({
+                        'title': (page_data or {}).get('title') or link.get('title') or '',
+                        'url': url,
+                        'content': text,
+                        'quality_score': ContentQuality.assess_content_relevance(text, query),
+                        'credibility_score': ContentQuality.assess_source_credibility(url)
+                    })
+                    visited += 1
+                    self.visited_urls.add(url)
+                # Go back quickly to results page
+                try:
+                    await self.page.go_back(wait_until="domcontentloaded")
+                except Exception:
+                    pass
+                await asyncio.sleep(0.5)
+            return results
+        except Exception as e:
+            logger.error(f"Fast multi-page extraction failed: {e}")
+            return results
     
     async def _ask_llm_to_prioritize_links(self, search_results: List[Dict], max_results: int) -> List[Dict]:
         """Intelligent link prioritization using multiple criteria and LLM guidance."""
         try:
-            # Prepare context for LLM
-            available_results = [r for r in search_results if r.get('href') and r.get('text')]
+            # Prepare context for LLM (accept either href/text or url/title)
+            normalized_results = []
+            for r in search_results:
+                href = r.get('href') or r.get('url')
+                text = r.get('text') or r.get('title')
+                if href and text:
+                    normalized_results.append({
+                        'href': href,
+                        'text': text,
+                        'snippet': r.get('snippet', ''),
+                        'index': r.get('index')
+                    })
+            available_results = normalized_results
             
             if not available_results:
                 return []
@@ -1353,7 +1427,7 @@ Respond in JSON format:
                 })
                 
                 assessed_links.append({
-                    'index': i,
+                    'index': result.get('index', i),
                     'title': result.get('text', ''),
                     'url': result.get('href', ''),
                     'snippet': result.get('snippet', ''),
@@ -1701,51 +1775,20 @@ Respond in JSON format:
                 log_browser_action("web_search", "starting_browser", {"reason": "page_not_available"})
                 await self.start_browser()
             
-            # Navigate to Google
-            log_browser_action("web_search", "navigate_to_google", {"url": "https://www.google.com"})
-            await self.page.goto("https://www.google.com", wait_until="domcontentloaded")
+            # Navigate directly to Google search results URL to avoid DOM-detached search box issues
+            import urllib.parse
+            search_url = "https://www.google.com/search?q=" + urllib.parse.quote_plus(query)
+            log_browser_action("web_search", "navigate_to_google_search", {"url": search_url})
+            await self.page.goto(search_url, wait_until="domcontentloaded")
             
-            # Handle cookie consent if present
+            # Handle cookie consent if present (some regions still show consent on results)
             try:
-                cookie_button = await self.page.wait_for_selector('button:has-text("I agree"), button:has-text("Accept all"), button:has-text("Accept")', timeout=5000)
+                cookie_button = await self.page.wait_for_selector('button:has-text("I agree"), button:has-text("Accept all"), button:has-text("Accept")', timeout=3000)
                 if cookie_button:
                     await cookie_button.click()
-                    log_browser_action("web_search", "cookie_consent_handled", {"action": "accepted"})
+                    log_browser_action("web_search", "cookie_consent_handled", {"action": "accepted_on_results"})
             except:
-                log_browser_action("web_search", "cookie_consent_handled", {"action": "not_found"})
                 pass
-            
-            # Wait for search box and fill it
-            log_browser_action("web_search", "filling_search_box", {"query": query})
-            
-            # Try different selectors for the search box
-            search_selectors = [
-                'textarea[name="q"]',
-                'input[name="q"]',
-                '[role="combobox"]',
-                '[aria-label*="Search"]'
-            ]
-            
-            search_box = None
-            for selector in search_selectors:
-                try:
-                    search_box = await self.page.wait_for_selector(selector, timeout=3000)
-                    if search_box:
-                        log_browser_action("web_search", "search_box_found", {"selector": selector})
-                        break
-                except:
-                    continue
-            
-            if not search_box:
-                raise Exception("Could not find Google search box")
-            
-            # Clear and fill the search box
-            await search_box.click()
-            await search_box.fill("")
-            await search_box.type(query, delay=100)  # Type with delay to be more human-like
-            
-            # Press Enter to search
-            await search_box.press("Enter")
             
             # Wait for search results
             log_browser_action("web_search", "waiting_for_results", {"query": query})
@@ -2443,91 +2486,95 @@ Provide a well-structured summary with clear sections and actionable insights.
             })
         
         try:
-            # Start browser if not already started
-            if not self.page:
-                log_browser_action("search", "starting_browser", {"reason": "page_not_available"})
-                await self.start_browser()
-                await self._write_progress_to_file(task_id, "browser_started", {"status": "success"})
+            # Lazily create a lock and serialize access to the Playwright page
+            if self._page_lock is None:
+                self._page_lock = asyncio.Lock()
+            async with self._page_lock:
+                # Start browser if not already started
+                if not self.page:
+                    log_browser_action("search", "starting_browser", {"reason": "page_not_available"})
+                    await self.start_browser()
+                    await self._write_progress_to_file(task_id, "browser_started", {"status": "success"})
+                
+                # Perform search with task monitoring
+                log_browser_action("search", "performing_web_search", {"query": query, "num_results": max_pages * 3})
+                await self._write_progress_to_file(task_id, "web_search_start", {"query": query})
+                
+                search_results = await self.web_search(query, num_results=max_pages * 3, task_id=task_id)
             
-            # Perform search with task monitoring
-            log_browser_action("search", "performing_web_search", {"query": query, "num_results": max_pages * 3})
-            await self._write_progress_to_file(task_id, "web_search_start", {"query": query})
-            
-            search_results = await self.web_search(query, num_results=max_pages * 3, task_id=task_id)
-            
-            await self._write_progress_to_file(task_id, "web_search_completed", {
-                "results_count": len(search_results.get('results', [])),
-                "first_results": search_results.get('results', [])[:3]
-            })
-            
-            log_browser_action("search", "web_search_completed", {
-                "query": query,
-                "results_count": len(search_results.get('results', [])),
-                "results": search_results.get('results', [])[:3]  # Log first 3 results
-            })
-            
-            extracted_content = []
-            
-            # Multi-page extraction with intelligent link selection
-            extracted_content = await self._multi_page_extraction_with_intelligence(
-                search_results['results'], query, max_pages, task_id
-            )
-            
-            duration = time.time() - start_time
-            
-            self._notify_progress("extraction", 1.0, f"Extracted from {len(extracted_content)} pages")
-            
-            # Write final progress
-            await self._write_progress_to_file(task_id, "search_completed", {
-                "total_extracted": len(extracted_content),
-                "total_pages_attempted": len(search_results.get('results', [])),
-                "duration": duration,
-                "success": len(extracted_content) > 0
-            })
-            
-            log_browser_action("search", "search_and_extract_completed", {
-                "query": query,
-                "total_pages_attempted": len(search_results.get('results', [])),
-                "successful_extractions": len(extracted_content),
-                "extracted_content": extracted_content,
-                "duration": duration
-            })
-            
-            # Generate summary of extracted content using LLM
-            if extracted_content:
-                log_browser_action("search", "starting_summarization", {
-                    "content_count": len(extracted_content),
-                    "query": query
+                await self._write_progress_to_file(task_id, "web_search_completed", {
+                    "results_count": len(search_results.get('results', [])),
+                    "first_results": search_results.get('results', [])[:3]
                 })
                 
-                summary = await self._summarize_extracted_content(extracted_content, query, task_id)
-                
-                log_browser_action("search", "summarization_completed", {
-                    "summary_length": len(summary),
-                    "query": query
-                })
-                
-                # Add summary to the returned content
-                extracted_content.append({
-                    'title': f"Research Summary: {query}",
-                    'url': 'summary_generated',
-                    'text': summary,
-                    'type': 'summary',
-                    'quality_score': 1.0,
-                    'credibility_score': 1.0
-                })
-            
-            # Log final task activity
-            if task_id:
-                log_task_activity(task_id, "search", f"Completed search and extract for: {query}", {
+                log_browser_action("search", "web_search_completed", {
                     "query": query,
-                    "successful_extractions": len(extracted_content),
+                    "results_count": len(search_results.get('results', [])),
+                    "results": search_results.get('results', [])[:3]  # Log first 3 results
+                })
+
+                extracted_content = []
+                
+                # Multi-page extraction (fast mode): open, extract, go back
+                extracted_content = await self._multi_page_extraction_fast(
+                    search_results['results'], query, max_pages, task_id
+                )
+                
+                duration = time.time() - start_time
+                
+                self._notify_progress("extraction", 1.0, f"Extracted from {len(extracted_content)} pages")
+                
+                # Write final progress
+                await self._write_progress_to_file(task_id, "search_completed", {
+                    "total_extracted": len(extracted_content),
                     "total_pages_attempted": len(search_results.get('results', [])),
                     "duration": duration,
-                    "summary_generated": len(extracted_content) > 0
-                }, duration, success=len(extracted_content) > 0)
-            
-            return extracted_content
+                    "success": len(extracted_content) > 0
+                })
+                
+                log_browser_action("search", "search_and_extract_completed", {
+                    "query": query,
+                    "total_pages_attempted": len(search_results.get('results', [])),
+                    "successful_extractions": len(extracted_content),
+                    "extracted_content": extracted_content,
+                    "duration": duration
+                })
+                
+                # Generate summary of extracted content using LLM
+                if extracted_content:
+                    log_browser_action("search", "starting_summarization", {
+                        "content_count": len(extracted_content),
+                        "query": query
+                    })
+                    
+                    summary = await self._summarize_extracted_content(extracted_content, query, task_id)
+                    
+                    log_browser_action("search", "summarization_completed", {
+                        "summary_length": len(summary),
+                        "query": query
+                    })
+                    
+                    # Add summary to the returned content
+                    extracted_content.append({
+                        'title': f"Research Summary: {query}",
+                        'url': 'summary_generated',
+                        'text': summary,
+                        'type': 'summary',
+                        'quality_score': 1.0,
+                        'credibility_score': 1.0
+                    })
+                
+                # Log final task activity
+                if task_id:
+                    log_task_activity(task_id, "search", f"Completed search and extract for: {query}", {
+                        "query": query,
+                        "successful_extractions": len(extracted_content),
+                        "total_pages_attempted": len(search_results.get('results', [])),
+                        "duration": duration,
+                        "summary_generated": len(extracted_content) > 0
+                    }, duration, success=len(extracted_content) > 0)
+                
+                return extracted_content
             
         except Exception as e:
             duration = time.time() - start_time

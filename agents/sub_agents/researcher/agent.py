@@ -11,6 +11,12 @@ from loguru import logger
 from llm_providers.provider_handler import llm_handler
 from tools.web_tools import web_tools, get_web_tools
 from tools.file_system_tools import file_system_tools, get_file_system_tools
+from tools.doc_ingestion import doc_ingestion, get_doc_ingestion_tools
+from tools.structured_extraction import structured_extraction, get_structured_extraction_tools
+from tools.spreadsheet_tools import spreadsheet_tools, get_spreadsheet_tools
+from tools.http_client import http_client, get_http_tools
+from tools.vector_memory import vector_memory, get_vector_memory_tools
+from tools.html_reporter import html_reporter, get_html_reporter_tools
 import config
 
 class ResearcherAgent:
@@ -56,6 +62,12 @@ Always prioritize accuracy, comprehensiveness, and source diversity in your rese
         tools = []
         tools.extend(get_web_tools())
         tools.extend(get_file_system_tools())
+        tools.extend(get_doc_ingestion_tools())
+        tools.extend(get_structured_extraction_tools())
+        tools.extend(get_spreadsheet_tools())
+        tools.extend(get_http_tools())
+        tools.extend(get_vector_memory_tools())
+        tools.extend(get_html_reporter_tools())
         return tools
     
     def _call_llm(self, messages: List[Dict], tools: Optional[List[Dict]] = None) -> Dict:
@@ -103,6 +115,39 @@ Always prioritize accuracy, comprehensiveness, and source diversity in your rese
                 result = await web_tools.click_link_and_extract(**arguments)
                 return json.dumps(result, indent=2)
             
+            elif function_name == 'ingest':
+                result = doc_ingestion.ingest(**arguments)
+                return json.dumps(result, indent=2)
+
+            elif function_name == 'extract_with_patterns':
+                result = structured_extraction.extract_with_patterns(**arguments)
+                return json.dumps(result, indent=2)
+
+            elif function_name in ['read_table', 'write_table', 'aggregate']:
+                if function_name == 'read_table':
+                    result = spreadsheet_tools.read_table(**arguments)
+                elif function_name == 'write_table':
+                    result = spreadsheet_tools.write_table(**arguments)
+                elif function_name == 'aggregate':
+                    result = spreadsheet_tools.aggregate(**arguments)
+                return json.dumps(result, indent=2)
+
+            elif function_name == 'http_request':
+                result = http_client.http_request(**arguments)
+                return json.dumps(result, indent=2)
+
+            elif function_name == 'vector_upsert':
+                result = vector_memory.upsert(**arguments)
+                return json.dumps(result, indent=2)
+
+            elif function_name == 'vector_query':
+                result = vector_memory.query(**arguments)
+                return json.dumps(result, indent=2)
+
+            elif function_name == 'render_html_report':
+                result = html_reporter.render(**arguments)
+                return json.dumps(result, indent=2)
+            
             elif function_name in ['read_file', 'write_file', 'append_file', 'list_files', 'create_directory']:
                 # File system operations
                 if function_name == 'read_file':
@@ -126,102 +171,131 @@ Always prioritize accuracy, comprehensiveness, and source diversity in your rese
             return f"Error executing {function_name}: {str(e)}"
     
     async def execute_task(self, task_description: str, context: str = "") -> str:
-        """
-        Execute a research task.
+        """Continuous LLM-guided research loop with query planning, link selection, and extraction."""
+        from tools.web_tools import web_tools
+        from tools.vector_memory import vector_memory
+        from tools.file_system_tools import file_system_tools
+        import time as _time
         
-        Args:
-            task_description: Description of the research task
-            context: Additional context or previous findings
-            
-        Returns:
-            Research results and findings
-        """
-        # Prepare messages
-        messages = [
-            {"role": "system", "content": self.system_prompt},
-            {"role": "user", "content": f"""
-Research Task: {task_description}
-
-Additional Context: {context}
-
-Please conduct thorough research on this topic. Your approach should include:
-
-1. **Initial Search Strategy**: Start with broad searches to understand the topic landscape
-2. **Source Diversification**: Find multiple types of sources (news, academic, official, expert opinions)
-3. **Deep Dive Analysis**: Scrape and analyze the most relevant sources in detail
-4. **Source Evaluation**: Assess credibility, bias, and reliability of sources
-5. **Information Organization**: Structure findings in a clear, logical format
-6. **Data Preservation**: Save important findings to files for future reference
-
-Focus on:
-- Finding authoritative and credible sources
-- Gathering diverse perspectives on the topic
-- Extracting key facts, figures, and insights
-- Identifying any controversies or debates
-- Noting publication dates and source reliability
-
-Save your research findings to appropriately named files in the workspace.
-"""}
-        ]
-        
-        max_iterations = 15
-        iteration = 0
-        
-        while iteration < max_iterations:
-            iteration += 1
-            
+        def _normalize(q: str) -> str:
             try:
-                # Get available tools
-                tools = self._get_available_tools()
-                
-                # Make LLM call
-                response = self._call_llm(messages, tools)
-                
-                if not response.get('choices'):
-                    break
-                
-                choice = response['choices'][0]
-                message = choice['message']
-                
-                # Add assistant message to conversation
-                messages.append(message)
-                
-                # Check if there are tool calls
-                if message.get('tool_calls'):
-                    # Execute tool calls
-                    for tool_call in message['tool_calls']:
-                        result = await self._execute_tool_call(tool_call)
-                        
-                        # Add tool result to conversation
-                        messages.append({
-                            "role": "tool",
-                            "tool_call_id": tool_call['id'],
-                            "name": tool_call['function']['name'],
-                            "content": result
-                        })
-                
-                # Check if the research is complete
-                if choice.get('finish_reason') == 'stop' and not message.get('tool_calls'):
-                    # Check if we have substantial research content
-                    if len(message.get('content', '')) > 500:
-                        break
-                    
-                    # Ask for more comprehensive research if needed
-                    messages.append({
-                        "role": "user",
-                        "content": "Please provide a more comprehensive summary of your research findings, including key sources, main insights, and any important details discovered."
-                    })
-                
-            except Exception as e:
-                logger.error(f"Error in research iteration {iteration}: {e}")
-                messages.append({
-                    "role": "user",
-                    "content": f"An error occurred: {str(e)}. Please continue with alternative research approaches."
-                })
+                import re
+                lowered = (q or "").lower()
+                lowered = re.sub(r"^\s*search\s+for:\s*", "", lowered)
+                collapsed = re.sub(r"(.)\1{1,}", r"\1", lowered)
+                cleaned = re.sub(r"[^a-z0-9\-\s]", " ", collapsed)
+                words = [w for w in cleaned.strip().split() if w]
+                return " ".join(words[:6])
+            except Exception:
+                return q
         
-        # Extract final research summary
-        if messages and messages[-1]['role'] == 'assistant':
-            return messages[-1]['content']
-        else:
-            return "Research completed. Please check the workspace files for detailed findings."
+        # 1) Ask LLM to propose initial short queries
+        plan_msgs = [
+            {"role": "system", "content": "Return JSON only."},
+            {"role": "user", "content": (
+                "Break the task into up to 8 short Google queries (<=6 words each).\n"
+                "Task: " + task_description + ("\nContext: " + context if context else "")
+            )}
+        ]
+        proposed = []
+        try:
+            resp = self._call_llm(plan_msgs)
+            content = (resp.get('choices') or [{}])[0].get('message', {}).get('content') if isinstance(resp, dict) else None
+            if content:
+                import json as _json
+                arr = _json.loads(content)
+                if isinstance(arr, list):
+                    for q in arr:
+                        if isinstance(q, str):
+                            nq = _normalize(q)
+                            if nq and nq not in proposed:
+                                proposed.append(nq)
+        except Exception:
+            pass
+        if not proposed:
+            # Deterministic fallback
+            base = _normalize(task_description)
+            proposed = [f"{base} overview", f"{base} latest", f"{base} trends"]
+            proposed = [
+                _normalize(p) for p in proposed
+            ]
+        
+        # 2) For each query: search → collect links → ask LLM which to open → open & extract
+        extracted_notes: List[Dict[str, Any]] = []
+        for q in proposed[:8]:
+            try:
+                search = await web_tools.web_search(query=q, num_results=12)
+                results = search.get('results', []) if isinstance(search, dict) else []
+                # Compact list for LLM
+                compact = []
+                for i, r in enumerate(results):
+                    href = r.get('url') or r.get('href')
+                    title = r.get('title') or r.get('text')
+                    if href and title:
+                        compact.append({"i": i, "title": title[:120], "url": href})
+                if not compact:
+                    continue
+                chooser = [
+                    {"role": "system", "content": "Return JSON only."},
+                    {"role": "user", "content": (
+                        "Query: " + q + "\nChoose up to 5 URLs to open now. Respond as JSON array of indices (from list).\nList:\n" +
+                        "\n".join([f"{c['i']}: {c['title']} ({c['url']})" for c in compact])
+                    )}
+                ]
+                ch_resp = self._call_llm(chooser)
+                chosen_idx = []
+                if isinstance(ch_resp, dict):
+                    ctext = (ch_resp.get('choices') or [{}])[0].get('message', {}).get('content')
+                    if ctext:
+                        import json as _json
+                        try:
+                            chosen_idx = _json.loads(ctext)
+                        except Exception:
+                            chosen_idx = []
+                if not isinstance(chosen_idx, list):
+                    chosen_idx = []
+                # Visit
+                visited = 0
+                for i in chosen_idx[:5]:
+                    if not isinstance(i, int) or i < 0 or i >= len(results):
+                        continue
+                    href = results[i].get('url') or results[i].get('href')
+                    title = results[i].get('title') or results[i].get('text') or ''
+                    if not href:
+                        continue
+                    ok = await web_tools.navigate_to(url=href)
+                    if not ok:
+                        continue
+                    data = await web_tools.extract_content()
+                    text = (data or {}).get('content') or ''
+                    if text and len(text) > 200:
+                        note = {
+                            'query': q, 'url': href, 'title': title, 'text': text[:4000]
+                        }
+                        extracted_notes.append(note)
+                        try:
+                            vector_memory.upsert("researcher_notes", [text[:1000]], metadatas=[{"q": q, "url": href}])
+                        except Exception:
+                            pass
+                        filename = f"research_{_time.time_ns()}_{i}.json"
+                        file_system_tools.write_file(filename, json.dumps(note, indent=2))
+                        visited += 1
+                    if visited >= 3:
+                        break
+            except Exception as e:
+                logger.warning(f"Query loop error for '{q}': {e}")
+                continue
+        
+        # 3) Summarize findings via LLM
+        summary_msgs = [
+            {"role": "system", "content": self.system_prompt},
+            {"role": "user", "content": (
+                "Task: " + task_description + ("\nContext: " + context if context else "") +
+                "\n\nSummarize the key insights from these notes (title, url, text snippet):\n" +
+                "\n\n".join([f"- {n.get('title','')} | {n.get('url','')}\n{n.get('text','')[:600]}" for n in extracted_notes[:10]])
+            )}
+        ]
+        final = self._call_llm(summary_msgs)
+        content = (final.get('choices') or [{}])[0].get('message', {}).get('content', '') if isinstance(final, dict) else ''
+        return content or "Research completed. Check workspace for saved notes."
 

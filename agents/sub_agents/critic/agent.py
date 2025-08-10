@@ -10,7 +10,9 @@ from loguru import logger
 
 from llm_providers.provider_handler import llm_handler
 from tools.file_system_tools import file_system_tools, get_file_system_tools
-from tools.web_tools import web_tools, get_web_tools
+from tools.http_client import http_client, get_http_tools
+from tools.structured_extraction import structured_extraction, get_structured_extraction_tools
+from tools.html_reporter import html_reporter, get_html_reporter_tools
 import config
 
 class CriticAgent:
@@ -50,13 +52,22 @@ Your responsibilities:
 - Assess the quality and credibility of sources
 - Provide constructive feedback for improvement
 
-Always maintain objectivity and focus on improving the quality and reliability of outputs."""
+Always maintain objectivity and focus on improving the quality and reliability of outputs.
+
+Hard constraints:
+- Do not include meta language such as "Incorporate this critique and finalize".
+- Do not include internal thoughts, scratchpads, or tokens like "think".
+- Produce end-user-facing content only.
+- If the user explicitly asks for an argument/essay/comparison (not a critique), write the argument directly with clear structure, section headings, and (when applicable) citations; do not return a critique in that case.
+"""
     
     def _get_available_tools(self) -> List[Dict]:
         """Get available tools for the critic agent."""
         tools = []
         tools.extend(get_file_system_tools())
-        tools.extend(get_web_tools())  # For fact-checking and verification
+        tools.extend(get_http_tools())  # For fact-checking via HTTP
+        tools.extend(get_structured_extraction_tools())
+        tools.extend(get_html_reporter_tools())
         return tools
     
     def _call_llm(self, messages: List[Dict], tools: Optional[List[Dict]] = None) -> Dict:
@@ -83,17 +94,17 @@ Always maintain objectivity and focus on improving the quality and reliability o
         arguments = json.loads(tool_call['function']['arguments'])
         
         try:
-            if function_name == 'web_search':
-                result = web_tools.web_search(**arguments)
+            if function_name == 'http_request':
+                result = http_client.http_request(**arguments)
                 return json.dumps(result, indent=2)
-            
-            elif function_name == 'scrape_url':
-                result = web_tools.scrape_url(**arguments)
+
+            elif function_name == 'extract_with_patterns':
+                result = structured_extraction.extract_with_patterns(**arguments)
                 return json.dumps(result, indent=2)
-            
-            elif function_name == 'read_url_content':
-                result = web_tools.read_url_content(**arguments)
-                return result
+
+            elif function_name == 'render_html_report':
+                result = html_reporter.render(**arguments)
+                return json.dumps(result, indent=2)
             
             elif function_name in ['read_file', 'write_file', 'append_file', 'list_files', 'create_directory']:
                 # File system operations
@@ -128,10 +139,33 @@ Always maintain objectivity and focus on improving the quality and reliability o
         Returns:
             Critical evaluation and recommendations
         """
-        # Prepare messages
-        messages = [
-            {"role": "system", "content": self.system_prompt},
-            {"role": "user", "content": f"""
+        # Determine mode: compose argument vs. critique
+        lower = (task_description or "").lower()
+        compose_keywords = ["argument", "make argument", "write", "essay", "vs ", "versus", "compare", "comparison"]
+        wants_compose = any(k in lower for k in compose_keywords) and (not context or "draft" not in context.lower())
+
+        if wants_compose:
+            # Compose a structured argument rather than a critique
+            messages = [
+                {"role": "system", "content": self.system_prompt},
+                {"role": "user", "content": f"""
+Write a rigorous, balanced, and well-structured argument:
+
+Task: {task_description}
+Context: {context}
+
+Requirements:
+- Provide a concise thesis, supporting arguments, counterarguments with rebuttals, and a synthesis conclusion.
+- Include sections on historical context, key figures/views, empirical indicators (if relevant), and policy/societal implications.
+- Maintain neutrality in tone; present multiple viewpoints fairly.
+- Add a short references list (web/print) at the end in plain text.
+"""}
+            ]
+        else:
+            # Default critical evaluation flow
+            messages = [
+                {"role": "system", "content": self.system_prompt},
+                {"role": "user", "content": f"""
 Critical Evaluation Task: {task_description}
 
 Additional Context: {context}
@@ -147,18 +181,11 @@ Please conduct a thorough critical evaluation following this systematic approach
 7. **Quality Assessment**: Evaluate overall quality, accuracy, and reliability
 8. **Improvement Recommendations**: Provide specific suggestions for enhancement
 
-Critical evaluation criteria:
-- Accuracy and factual correctness
-- Source credibility and authority
-- Logical consistency and reasoning
-- Completeness and comprehensiveness
-- Objectivity and balance
-- Clarity and organization
-- Evidence quality and support
-
-Focus on providing constructive, specific feedback that helps improve the quality and reliability of the work.
+Constraints:
+- Do not include meta language (e.g., "Incorporate this critique and finalize").
+- Do not include hidden thoughts or the token "think".
 """}
-        ]
+            ]
         
         max_iterations = 12
         iteration = 0
@@ -215,9 +242,26 @@ Focus on providing constructive, specific feedback that helps improve the qualit
                     "content": f"An error occurred: {str(e)}. Please continue with the critical evaluation using alternative approaches."
                 })
         
-        # Extract final evaluation summary
+        # Extract final output and sanitize
         if messages and messages[-1]['role'] == 'assistant':
-            return messages[-1]['content']
-        else:
-            return "Critical evaluation completed. Please check the workspace files for detailed feedback and recommendations."
+            import re
+            content = messages[-1]['content'] or ""
+            # Remove hidden/think tokens and common meta phrases
+            for bad in [
+                "Incorporate this critique and finalize",
+                "Incorporate this and finalize",
+                "Do not include",
+                "◁think▷",
+                "◁/think▷",
+                "<think>",
+                "</think>"
+            ]:
+                content = content.replace(bad, "")
+            # Strip obvious planning preambles
+            content = re.sub(r"(?is)^.*?(#|##)\s", r"\1 ", content)
+            # Fallback: remove lines starting with planning language
+            lines = [ln for ln in content.splitlines() if not re.match(r"^(Let me|I need to|Now, let me|Plan:)", ln.strip())]
+            content = "\n".join(lines).strip()
+            return content
+        return "Completed."
 

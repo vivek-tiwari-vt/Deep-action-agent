@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Any
 from loguru import logger
 import time
+from tools.process_sandbox import run_with_limits
 
 class CodeInterpreter:
     """Safe Python code execution environment."""
@@ -34,7 +35,8 @@ class CodeInterpreter:
     def execute_python_code(self, 
                            code: str, 
                            timeout: int = 30,
-                           capture_output: bool = True) -> Dict[str, Any]:
+                           capture_output: bool = True,
+                           python_executable: Optional[str] = None) -> Dict[str, Any]:
         """
         Execute Python code in a safe environment.
         
@@ -73,13 +75,13 @@ sys.path.insert(0, WORKSPACE_PATH)
                 f.write(prepared_code)
             
             # Execute the code
-            result = subprocess.run(
-                [sys.executable, str(code_file)],
-                capture_output=capture_output,
-                text=True,
-                timeout=timeout,
-                cwd=str(self.workspace_root)
-            )
+            py_exec = python_executable or sys.executable
+            completed = run_with_limits([py_exec, str(code_file)], timeout=timeout)
+            class R: pass
+            result = R()
+            result.returncode = completed.returncode
+            result.stdout = completed.stdout
+            result.stderr = completed.stderr
             
             # Clean up the temporary file
             try:

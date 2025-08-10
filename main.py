@@ -15,8 +15,9 @@ from typing import Dict, List, Optional, Any
 from contextlib import asynccontextmanager
 import time
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from loguru import logger
 from rich.console import Console
@@ -34,6 +35,7 @@ from agents.manager_agent import ManagerAgent
 from tools.progress_tracker import progress_tracker
 from tools.rate_limit_manager import rate_limit_manager
 from tools.task_monitor import get_task_status as get_task_monitor_status
+from tools.event_bus import event_bus
 import config
 
 console = Console()
@@ -285,11 +287,9 @@ async def execute_task_background(task_id: str, task_request: TaskRequest):
         # Initialize manager agent with the API task ID
         manager = ManagerAgent(workspace_path, task_id=task_id)
         
-        # Execute task based on type
-        if task_request.task_type == "research":
-            result = await manager.execute_research_task(task_request.task_description)
-        else:
-            result = manager.execute_task(task_request.task_description)
+        # Smart routing: always use the iterative planner–executor loop which
+        # internally decides whether to run the dedicated research flow
+        result = await manager.execute_task_iterative(task_request.task_description)
         
         # Store result
         task_results[task_id] = {
@@ -382,6 +382,17 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan
 )
+
+# Serve minimal frontend if present
+FRONTEND_DIR = os.path.join(os.path.dirname(__file__), "frontend")
+if os.path.isdir(FRONTEND_DIR):
+    # Serve UI at /app to avoid conflicting with API routes like /execute
+    app.mount("/app", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")
+
+    # Redirect / to /app
+    @app.get("/")
+    async def _root_redirect():
+        return RedirectResponse(url="/app/")
 
 @app.post("/execute", response_model=TaskResponse)
 async def execute_task(task_request: TaskRequest, background_tasks: BackgroundTasks):
@@ -580,6 +591,39 @@ async def get_task_monitor(task_id: str):
     except Exception as e:
         logger.error(f"Error getting task monitor for {task_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Error retrieving task monitor: {str(e)}")
+
+@app.get("/events/{task_id}")
+async def sse_events(task_id: str, request: Request):
+    """Minimal Server-Sent Events endpoint streaming progress lines."""
+    from starlette.responses import StreamingResponse
+
+    async def event_generator():
+        last_progress = -1
+        while True:
+            if await request.is_disconnected():
+                break
+            prog = progress_tracker.get_task_progress(task_id)
+            if prog and getattr(prog, 'current_step_num', -1) != last_progress:
+                last_progress = getattr(prog, 'current_step_num', -1)
+                data = {
+                    "task_id": task_id,
+                    "status": prog.status.value if hasattr(prog.status, 'value') else str(prog.status),
+                    "progress": prog.progress,
+                    "current_step": prog.current_step,
+                }
+                yield f"data: {json.dumps(data)}\n\n"
+            await asyncio.sleep(1)
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+@app.websocket("/ws/{task_id}")
+async def websocket_events(websocket: WebSocket, task_id: str):
+    await websocket.accept()
+    try:
+        async for evt in event_bus.subscribe(task_id):
+            await websocket.send_json(evt)
+    except WebSocketDisconnect:
+        return
 
 @app.get("/tasks", response_model=List[TaskStatusResponse])
 async def list_tasks():

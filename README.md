@@ -18,6 +18,7 @@ A sophisticated multi-agent AI system for research, analysis, and action tasks w
 - **Rate Limiting**: Intelligent request management to avoid detection
 - **Error Recovery**: Resilient file creation and error handling
 - **Task Monitoring**: Real-time activity tracking and deviation detection
+- **Live Streaming**: SSE (`/events/{task_id}`) and WebSocket (`/ws/{task_id}`) stream tokens and tool events
 
 ## 📁 Project Structure
 
@@ -108,6 +109,20 @@ curl "http://localhost:8000/monitor/{task_id}"
 ```
 
 #### Health Check
+#### Live Events (SSE)
+```bash
+curl -N "http://localhost:8000/events/{task_id}"
+```
+
+#### Live Events (WebSocket)
+Minimal JS client example:
+```javascript
+const ws = new WebSocket(`ws://localhost:8000/ws/${taskId}`);
+ws.onmessage = (e) => {
+  const evt = JSON.parse(e.data);
+  console.log('event', evt);
+};
+```
 ```bash
 curl "http://localhost:8000/health"
 ```

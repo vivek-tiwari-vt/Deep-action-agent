@@ -132,6 +132,21 @@ class FileManager:
             Dictionary with operation result
         """
         try:
+            from config import ALLOWED_FILE_EXTENSIONS, MAX_FILE_SIZE_MB
+            # Security: validate extension and content size
+            if not any(str(file_path).endswith(ext) for ext in ALLOWED_FILE_EXTENSIONS):
+                return {
+                    'success': False,
+                    'error': f'File type not allowed: {file_path}'
+                }
+            content_bytes = content.encode(encoding, errors='ignore')
+            size_mb = len(content_bytes) / (1024 * 1024)
+            if size_mb > MAX_FILE_SIZE_MB:
+                return {
+                    'success': False,
+                    'error': f'File too large: {size_mb:.2f} MB > {MAX_FILE_SIZE_MB} MB'
+                }
+
             resolved_path = self._resolve_path(file_path)
             
             # Ensure directory exists
@@ -172,6 +187,20 @@ class FileManager:
             Dictionary with operation result
         """
         try:
+            from config import ALLOWED_FILE_EXTENSIONS, MAX_FILE_SIZE_MB
+            if not any(str(file_path).endswith(ext) for ext in ALLOWED_FILE_EXTENSIONS):
+                return {
+                    'success': False,
+                    'error': f'File type not allowed: {file_path}'
+                }
+            content_bytes = content.encode(encoding, errors='ignore')
+            size_mb = len(content_bytes) / (1024 * 1024)
+            if size_mb > MAX_FILE_SIZE_MB:
+                return {
+                    'success': False,
+                    'error': f'Append content too large: {size_mb:.2f} MB > {MAX_FILE_SIZE_MB} MB'
+                }
+
             resolved_path = self._resolve_path(file_path)
             
             # Ensure directory exists

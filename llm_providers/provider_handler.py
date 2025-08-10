@@ -6,7 +6,7 @@ Manages API calls to multiple LLM providers with round-robin key rotation.
 import itertools
 import time
 import json
-from typing import Dict, List, Optional, Any, Union
+from typing import Dict, List, Optional, Any, Union, Callable
 import requests
 from loguru import logger
 import config
@@ -329,6 +329,8 @@ class LLMProviderHandler:
                 messages: List[Dict],
                 tools: Optional[List[Dict]] = None,
                 max_retries: int = 3,
+                stream_tokens: bool = False,
+                on_delta: Optional[Callable[[Dict[str, Any]], None]] = None,
                 **kwargs) -> Dict:
         """
         Main method to call LLM with automatic provider selection and retry logic.
@@ -352,9 +354,9 @@ class LLMProviderHandler:
         for attempt in range(max_retries):
             try:
                 if provider == 'openrouter':
-                    return self._call_openrouter(model, messages, tools, **kwargs)
+                    return self._call_openrouter(model, messages, tools, stream_tokens=stream_tokens, on_delta=on_delta, **kwargs)
                 elif provider == 'gemini':
-                    return self._call_gemini(model, messages, tools, **kwargs)
+                    return self._call_gemini(model, messages, tools, stream_tokens=stream_tokens, on_delta=on_delta, **kwargs)
                 else:
                     raise ValueError(f"Unknown provider: {provider}")
                     
